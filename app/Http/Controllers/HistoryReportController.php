@@ -17,13 +17,8 @@ class HistoryReportController extends Controller
 {
     public function index(Request $request): View
     {
-        $records = new LengthAwarePaginator(
-            [],
-            0,
-            10,
-            1,
-            ['path' => Paginator::resolveCurrentPath(), 'pageName' => 'page']
-        );
+        $records = collect();
+        $cursorPagination = null;
 
         $vendingCodes = collect();
         $selectedVending = $request->query('vending');
@@ -33,6 +28,7 @@ class HistoryReportController extends Controller
         $vendingStockTotal = null;
         $totalLabel = null;
         $totalAmount = null;
+        $perPage = 10;
 
         try {
             if (! class_exists(ServiceAccountCredentials::class)) {
@@ -61,43 +57,34 @@ class HistoryReportController extends Controller
 
             $projectId = (string) config('firebase.project_id');
             $baseUrl = "https://firestore.googleapis.com/v1/projects/{$projectId}/databases/(default)";
+            $hasActiveFilters = $this->hasActiveFilters($selectedVending, $selectedFrom, $selectedTo);
 
-            // === OBTENER TODOS LOS DOCUMENTOS DE LA COLECCIÓN 'history' CON PAGINACIÓN ===
-            $allDocuments = [];
-            $pageToken = null;
-            $pageSize = 300; // Máximo permitido por Firestore en list documents
+            if (! $hasActiveFilters) {
+                $cursor = $this->decodeCursorToken($request->query('cursor'));
+                $stack = $this->decodeCursorStack($request->query('stack'));
+                $historyPage = $this->fetchHistoryPage($accessToken, $baseUrl, $cursor, $perPage);
 
-            do {
-                $queryParams = ['pageSize' => $pageSize];
-                if ($pageToken !== null) {
-                    $queryParams['pageToken'] = $pageToken;
-                }
+                $records = $this->mapDocuments($historyPage['documents']);
+                $vendingCodes = $this->fetchVendingCodes($accessToken, $baseUrl);
+                $cursorPagination = $this->buildCursorPagination(
+                    $request,
+                    $stack,
+                    $cursor,
+                    $historyPage['nextPageToken'],
+                    $records->count(),
+                    $perPage
+                );
+            } else {
+                $allDocuments = $this->fetchAllHistoryDocuments($accessToken, $baseUrl);
+                $allRecords = $this->mapDocuments($allDocuments);
 
-                $response = Http::timeout(30)
-                    ->withToken($accessToken)
-                    ->get("{$baseUrl}/documents/history", $queryParams);
+                $vendingCodes = $this->extractDistinctVendingCodes($allRecords);
+                $filtered = $this->filterRecordsToCollection($allRecords, $selectedVending, $selectedFrom, $selectedTo);
+                $records = $this->paginateCollection($filtered, $perPage);
+                $records->appends($request->except(['page', 'cursor', 'stack']));
 
-                if (! $response->successful()) {
-                    throw new \RuntimeException('Error Firestore REST (history): '.$response->status().' '.$response->body());
-                }
-
-                $data = $response->json();
-                $documents = $data['documents'] ?? [];
-                $allDocuments = array_merge($allDocuments, $documents);
-
-                $pageToken = $data['nextPageToken'] ?? null;
-
-            } while ($pageToken !== null);
-
-            // Mapear todos los documentos obtenidos
-            $allRecords = $this->mapDocuments($allDocuments);
-
-            $vendingCodes = $this->extractDistinctVendingCodes($allRecords);
-            $filtered = $this->filterRecordsToCollection($allRecords, $selectedVending, $selectedFrom, $selectedTo);
-            $records = $this->paginateCollection($filtered, 10);
-            $records->appends($request->except('page'));
-
-            [$totalLabel, $totalAmount] = $this->computeTotalsForFilters($filtered, $selectedVending);
+                [$totalLabel, $totalAmount] = $this->computeTotalsForFilters($filtered, $selectedVending);
+            }
 
             if (is_string($selectedVending) && trim($selectedVending) !== '') {
                 try {
@@ -120,6 +107,7 @@ class HistoryReportController extends Controller
 
         return view('history-report', [
             'records' => $records,
+            'cursorPagination' => $cursorPagination,
             'vendingCodes' => $vendingCodes,
             'selectedVending' => $selectedVending,
             'selectedFrom' => $selectedFrom,
@@ -129,6 +117,209 @@ class HistoryReportController extends Controller
             'totalAmount' => $totalAmount,
             'error' => $error,
         ]);
+    }
+
+    private function hasActiveFilters(?string $selectedVending, ?string $selectedFrom, ?string $selectedTo): bool
+    {
+        return (is_string($selectedVending) && trim($selectedVending) !== '')
+            || (is_string($selectedFrom) && trim($selectedFrom) !== '')
+            || (is_string($selectedTo) && trim($selectedTo) !== '');
+    }
+
+    private function fetchAllHistoryDocuments(string $accessToken, string $baseUrl): array
+    {
+        $allDocuments = [];
+        $pageToken = null;
+        $pageSize = 300;
+
+        do {
+            $queryParams = ['pageSize' => $pageSize];
+            if ($pageToken !== null) {
+                $queryParams['pageToken'] = $pageToken;
+            }
+
+            $response = Http::timeout(30)
+                ->withToken($accessToken)
+                ->get("{$baseUrl}/documents/history", $queryParams);
+
+            if (! $response->successful()) {
+                throw new \RuntimeException('Error Firestore REST (history): '.$response->status().' '.$response->body());
+            }
+
+            $data = $response->json();
+            $documents = $data['documents'] ?? [];
+            $allDocuments = array_merge($allDocuments, $documents);
+            $pageToken = $data['nextPageToken'] ?? null;
+        } while ($pageToken !== null);
+
+        return $allDocuments;
+    }
+
+    private function fetchHistoryPage(string $accessToken, string $baseUrl, ?string $cursor, int $perPage): array
+    {
+        $queryParams = ['pageSize' => $perPage];
+        if ($cursor !== null && $cursor !== '') {
+            $queryParams['pageToken'] = $cursor;
+        }
+
+        $response = Http::timeout(30)
+            ->withToken($accessToken)
+            ->get("{$baseUrl}/documents/history", $queryParams);
+
+        if (! $response->successful()) {
+            throw new \RuntimeException('Error Firestore REST (history page): '.$response->status().' '.$response->body());
+        }
+
+        return [
+            'documents' => $response->json('documents', []),
+            'nextPageToken' => $response->json('nextPageToken'),
+        ];
+    }
+
+    private function fetchVendingCodes(string $accessToken, string $baseUrl): Collection
+    {
+        $codes = [];
+        $pageToken = null;
+
+        do {
+            $queryParams = ['pageSize' => 200];
+            if ($pageToken !== null) {
+                $queryParams['pageToken'] = $pageToken;
+            }
+
+            $response = Http::timeout(20)
+                ->withToken($accessToken)
+                ->get("{$baseUrl}/documents/config", $queryParams);
+
+            if (! $response->successful()) {
+                Log::warning('No se pudieron cargar los vending codes desde config.', [
+                    'status' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+                break;
+            }
+
+            $documents = $response->json('documents', []);
+            foreach ($documents as $document) {
+                if (! is_array($document)) {
+                    continue;
+                }
+
+                $name = (string) ($document['name'] ?? '');
+                $code = trim((string) basename($name));
+                if ($code !== '') {
+                    $codes[] = $code;
+                }
+            }
+
+            $pageToken = $response->json('nextPageToken');
+        } while ($pageToken);
+
+        return collect($codes)->unique()->sort()->values();
+    }
+
+    private function buildCursorPagination(
+        Request $request,
+        array $stack,
+        ?string $currentCursor,
+        ?string $nextCursor,
+        int $currentCount,
+        int $perPage
+    ): array {
+        $currentPage = count($stack) + 1;
+        $hasPrevious = $stack !== [];
+        $hasNext = is_string($nextCursor) && trim($nextCursor) !== '';
+        $from = $currentCount > 0 ? (($currentPage - 1) * $perPage) + 1 : 0;
+        $to = $currentCount > 0 ? $from + $currentCount - 1 : 0;
+
+        $previousUrl = null;
+        if ($hasPrevious) {
+            $previousStack = $stack;
+            $previousCursor = array_pop($previousStack);
+            $previousCursor = $previousCursor === '' ? null : $previousCursor;
+            $previousUrl = $this->buildCursorUrl($request, $previousCursor, $previousStack);
+        }
+
+        $nextUrl = null;
+        if ($hasNext) {
+            $nextStack = $stack;
+            $nextStack[] = $currentCursor ?? '';
+            $nextUrl = $this->buildCursorUrl($request, $nextCursor, $nextStack);
+        }
+
+        return [
+            'currentPage' => $currentPage,
+            'from' => $from,
+            'to' => $to,
+            'hasPrevious' => $hasPrevious,
+            'hasNext' => $hasNext,
+            'previousUrl' => $previousUrl,
+            'nextUrl' => $nextUrl,
+        ];
+    }
+
+    private function buildCursorUrl(Request $request, ?string $cursor, array $stack): string
+    {
+        $params = $request->except(['page', 'cursor', 'stack']);
+        if ($cursor !== null && $cursor !== '') {
+            $params['cursor'] = $this->encodeCursorToken($cursor);
+        }
+        if ($stack !== []) {
+            $params['stack'] = $this->encodeCursorStack($stack);
+        }
+
+        return route('history.report', $params);
+    }
+
+    private function encodeCursorToken(string $token): string
+    {
+        return rtrim(strtr(base64_encode($token), '+/', '-_'), '=');
+    }
+
+    private function decodeCursorToken(mixed $token): ?string
+    {
+        if (! is_string($token) || trim($token) === '') {
+            return null;
+        }
+
+        $normalized = strtr($token, '-_', '+/');
+        $padding = strlen($normalized) % 4;
+        if ($padding > 0) {
+            $normalized .= str_repeat('=', 4 - $padding);
+        }
+
+        $decoded = base64_decode($normalized, true);
+        return is_string($decoded) && $decoded !== '' ? $decoded : null;
+    }
+
+    private function encodeCursorStack(array $stack): string
+    {
+        return rtrim(strtr(base64_encode((string) json_encode(array_values($stack))), '+/', '-_'), '=');
+    }
+
+    private function decodeCursorStack(mixed $stack): array
+    {
+        if (! is_string($stack) || trim($stack) === '') {
+            return [];
+        }
+
+        $normalized = strtr($stack, '-_', '+/');
+        $padding = strlen($normalized) % 4;
+        if ($padding > 0) {
+            $normalized .= str_repeat('=', 4 - $padding);
+        }
+
+        $decoded = base64_decode($normalized, true);
+        if (! is_string($decoded) || trim($decoded) === '') {
+            return [];
+        }
+
+        $parsed = json_decode($decoded, true);
+        if (! is_array($parsed)) {
+            return [];
+        }
+
+        return array_values(array_filter($parsed, fn ($value) => is_string($value)));
     }
 
     // ===================================================================

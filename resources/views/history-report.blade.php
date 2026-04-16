@@ -360,34 +360,68 @@
 
             <div class="pagination">
                 <div class="pagination-info">
-                    Mostrando {{ $records->firstItem() ?? 0 }} - {{ $records->lastItem() ?? 0 }} de {{ $records->total() }} registros
+                    @if ($cursorPagination)
+                        Mostrando {{ $cursorPagination['from'] }} - {{ $cursorPagination['to'] }} registros
+                    @else
+                        Mostrando {{ $records->firstItem() ?? 0 }} - {{ $records->lastItem() ?? 0 }} de {{ $records->total() }} registros
+                    @endif
                 </div>
                 <div class="pagination-links">
-                    @if ($records->onFirstPage())
-                        <span class="page-link disabled">Anterior</span>
-                    @else
-                        <a class="page-link" href="{{ $records->previousPageUrl() }}">Anterior</a>
-                    @endif
+                    @if ($cursorPagination)
+                        @php
+                            $cursorCurrentPage = $cursorPagination['currentPage'];
+                            $cursorPrevPage = max(1, $cursorCurrentPage - 1);
+                            $cursorNextPage = $cursorCurrentPage + 1;
+                        @endphp
 
-                    @php
-                        $currentPage = $records->currentPage();
-                        $lastPage = $records->lastPage();
-                        $startPage = max(1, $currentPage - 1);
-                        $endPage = min($lastPage, $currentPage + 1);
-                    @endphp
-
-                    @foreach ($records->getUrlRange($startPage, $endPage) as $page => $url)
-                        @if ($page === $records->currentPage())
-                            <span class="page-link active">{{ $page }}</span>
+                        @if ($cursorPagination['hasPrevious'])
+                            <a class="page-link" href="{{ $cursorPagination['previousUrl'] }}">Anterior</a>
                         @else
-                            <a class="page-link" href="{{ $url }}">{{ $page }}</a>
+                            <span class="page-link disabled">Anterior</span>
                         @endif
-                    @endforeach
 
-                    @if ($records->hasMorePages())
-                        <a class="page-link" href="{{ $records->nextPageUrl() }}">Siguiente</a>
+                        @if ($cursorPagination['hasPrevious'])
+                            <a class="page-link" href="{{ $cursorPagination['previousUrl'] }}">{{ $cursorPrevPage }}</a>
+                        @endif
+
+                        <span class="page-link active">{{ $cursorCurrentPage }}</span>
+
+                        @if ($cursorPagination['hasNext'])
+                            <a class="page-link" href="{{ $cursorPagination['nextUrl'] }}">{{ $cursorNextPage }}</a>
+                        @endif
+
+                        @if ($cursorPagination['hasNext'])
+                            <a class="page-link" href="{{ $cursorPagination['nextUrl'] }}">Siguiente</a>
+                        @else
+                            <span class="page-link disabled">Siguiente</span>
+                        @endif
                     @else
-                        <span class="page-link disabled">Siguiente</span>
+                        @if ($records->onFirstPage())
+                            <span class="page-link disabled">Anterior</span>
+                        @else
+                            <a class="page-link" href="{{ $records->previousPageUrl() }}">Anterior</a>
+                        @endif
+
+                        @php
+                            $currentPage = $records->currentPage();
+                            $lastPage = $records->lastPage();
+                            $startPage = max(1, $currentPage - 1);
+                            $endPage = min($lastPage, $currentPage + 1);
+                        @endphp
+
+                        @foreach ($records->getUrlRange($startPage, $endPage) as $page => $url)
+                            @if ($page === $records->currentPage())
+                                <span class="page-link active">{{ $page }}</span>
+                            @else
+                                <a class="page-link" href="{{ $url }}">{{ $page }}</a>
+                            @endif
+                        @endforeach
+
+                        @if ($records->hasMorePages())
+                            <a class="page-link" href="{{ $records->nextPageUrl() }}">Siguiente</a>
+                        @else
+                            <span class="page-link disabled">Siguiente</span>
+                        @endif
                     @endif
                 </div>
             </div>
