@@ -14,8 +14,6 @@ use Illuminate\Support\Facades\Route;
 |
 */
 
-Route::get('/', function () {
-    return view('welcome');
-});
+Route::redirect('/', '/reportes/history');
 
 Route::get('/reportes/history', [HistoryReportController::class, 'index'])->name('history.report');

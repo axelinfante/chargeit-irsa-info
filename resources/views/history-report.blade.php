@@ -369,7 +369,14 @@
                         <a class="page-link" href="{{ $records->previousPageUrl() }}">Anterior</a>
                     @endif
 
-                    @foreach ($records->getUrlRange(1, $records->lastPage()) as $page => $url)
+                    @php
+                        $currentPage = $records->currentPage();
+                        $lastPage = $records->lastPage();
+                        $startPage = max(1, $currentPage - 1);
+                        $endPage = min($lastPage, $currentPage + 1);
+                    @endphp
+
+                    @foreach ($records->getUrlRange($startPage, $endPage) as $page => $url)
                         @if ($page === $records->currentPage())
                             <span class="page-link active">{{ $page }}</span>
                         @else
