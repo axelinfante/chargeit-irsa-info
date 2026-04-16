@@ -24,6 +24,7 @@ class HistoryReportController extends Controller
             1,
             ['path' => Paginator::resolveCurrentPath(), 'pageName' => 'page']
         );
+
         $vendingCodes = collect();
         $selectedVending = $request->query('vending');
         $selectedFrom = $request->query('desde');
@@ -61,16 +62,36 @@ class HistoryReportController extends Controller
             $projectId = (string) config('firebase.project_id');
             $baseUrl = "https://firestore.googleapis.com/v1/projects/{$projectId}/databases/(default)";
 
-            $response = Http::timeout(20)
-                ->withToken($accessToken)
-                ->get($baseUrl.'/documents/history', ['pageSize' => 300]);
+            // === OBTENER TODOS LOS DOCUMENTOS DE LA COLECCIÓN 'history' CON PAGINACIÓN ===
+            $allDocuments = [];
+            $pageToken = null;
+            $pageSize = 300; // Máximo permitido por Firestore en list documents
 
-            if (! $response->successful()) {
-                throw new \RuntimeException('Error Firestore REST (history): '.$response->status().' '.$response->body());
-            }
+            do {
+                $queryParams = ['pageSize' => $pageSize];
+                if ($pageToken !== null) {
+                    $queryParams['pageToken'] = $pageToken;
+                }
 
-            $documents = $response->json('documents', []);
-            $allRecords = $this->mapDocuments($documents);
+                $response = Http::timeout(30)
+                    ->withToken($accessToken)
+                    ->get("{$baseUrl}/documents/history", $queryParams);
+
+                if (! $response->successful()) {
+                    throw new \RuntimeException('Error Firestore REST (history): '.$response->status().' '.$response->body());
+                }
+
+                $data = $response->json();
+                $documents = $data['documents'] ?? [];
+                $allDocuments = array_merge($allDocuments, $documents);
+
+                $pageToken = $data['nextPageToken'] ?? null;
+
+            } while ($pageToken !== null);
+
+            // Mapear todos los documentos obtenidos
+            $allRecords = $this->mapDocuments($allDocuments);
+
             $vendingCodes = $this->extractDistinctVendingCodes($allRecords);
             $filtered = $this->filterRecordsToCollection($allRecords, $selectedVending, $selectedFrom, $selectedTo);
             $records = $this->paginateCollection($filtered, 10);
@@ -109,6 +130,10 @@ class HistoryReportController extends Controller
             'error' => $error,
         ]);
     }
+
+    // ===================================================================
+    // Los métodos privados se mantienen exactamente igual que antes
+    // ===================================================================
 
     private function mapDocuments(iterable $documents): Collection
     {
@@ -158,28 +183,45 @@ class HistoryReportController extends Controller
             return (bool) $value['booleanValue'];
         }
 
-        if (array_key_exists('timestampValue', $value)) {
-            return $value['timestampValue'];
-        }
+       // ==================== CAMBIO AQUÍ ====================
+    if (array_key_exists('timestampValue', $value)) {
+        $timestampStr = $value['timestampValue']; // Ej: "2026-04-16T18:30:00Z" o con fracción
 
+        try {
+            // Creamos el DateTime en UTC
+            $date = new \DateTime($timestampStr, new \DateTimeZone('UTC'));
+            
+            // Convertimos a hora de Argentina (UTC-3)
+            $date->setTimezone(new \DateTimeZone('America/Argentina/Buenos_Aires'));
+            
+            // Devolvemos en formato legible (podés cambiar el formato)
+            return $date->format('Y-m-d H:i:s');   // Ej: 2026-04-16 15:30:00
+            // O si preferís solo fecha: return $date->format('Y-m-d');
+            
+        } catch (\Exception $e) {
+            Log::warning('Error al convertir timestamp de Firestore', [
+                'timestamp' => $timestampStr,
+                'error' => $e->getMessage()
+            ]);
+            return $timestampStr; // fallback
+        }
+    }
+    // ====================================================
         if (array_key_exists('nullValue', $value)) {
             return null;
         }
 
         if (array_key_exists('arrayValue', $value)) {
             $items = $value['arrayValue']['values'] ?? [];
-
             return collect($items)->map(fn ($item) => $this->readFirestoreValue($item))->all();
         }
 
         if (array_key_exists('mapValue', $value)) {
             $fields = $value['mapValue']['fields'] ?? [];
             $mapped = [];
-
             foreach ($fields as $key => $item) {
                 $mapped[$key] = $this->readFirestoreValue($item);
             }
-
             return $mapped;
         }
 
@@ -196,9 +238,6 @@ class HistoryReportController extends Controller
             ->values();
     }
 
-    /**
-     * @return array{0: string, 1: float}
-     */
     private function computeTotalsForFilters(Collection $filtered, ?string $selectedVending): array
     {
         $specificVending = is_string($selectedVending) && trim($selectedVending) !== '';
@@ -297,31 +336,20 @@ class HistoryReportController extends Controller
 
         $text = Str::lower(trim($value));
         $months = [
-            'enero' => '01',
-            'febrero' => '02',
-            'marzo' => '03',
-            'abril' => '04',
-            'mayo' => '05',
-            'junio' => '06',
-            'julio' => '07',
-            'agosto' => '08',
-            'septiembre' => '09',
-            'setiembre' => '09',
-            'octubre' => '10',
-            'noviembre' => '11',
-            'diciembre' => '12',
+            'enero' => '01', 'febrero' => '02', 'marzo' => '03', 'abril' => '04',
+            'mayo' => '05', 'junio' => '06', 'julio' => '07', 'agosto' => '08',
+            'septiembre' => '09', 'setiembre' => '09', 'octubre' => '10',
+            'noviembre' => '11', 'diciembre' => '12',
         ];
 
         foreach ($months as $name => $number) {
             $text = str_replace($name, $number, $text);
         }
 
-        // Captura fechas tipo: "13 de 03 de 2026 ..."
         if (preg_match('/(\d{1,2})\s+de\s+(\d{2})\s+de\s+(\d{4})/', $text, $matches)) {
             return sprintf('%04d-%02d-%02d', (int) $matches[3], (int) $matches[2], (int) $matches[1]);
         }
 
-        // Captura ISO o fecha al inicio del string.
         if (preg_match('/(\d{4})-(\d{2})-(\d{2})/', $text, $matches)) {
             return sprintf('%04d-%02d-%02d', (int) $matches[1], (int) $matches[2], (int) $matches[3]);
         }
