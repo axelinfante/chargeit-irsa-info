@@ -31,32 +31,7 @@ class HistoryReportController extends Controller
         $perPage = 10;
 
         try {
-            if (! class_exists(ServiceAccountCredentials::class)) {
-                throw new \RuntimeException('Falta la dependencia "google/auth". Ejecuta composer update.');
-            }
-
-            $serviceAccount = [
-                'type' => 'service_account',
-                'project_id' => config('firebase.project_id'),
-                'private_key' => str_replace('\n', PHP_EOL, (string) config('firebase.private_key')),
-                'client_email' => config('firebase.client_email'),
-                'token_uri' => 'https://oauth2.googleapis.com/token',
-            ];
-
-            $credentials = new ServiceAccountCredentials(
-                ['https://www.googleapis.com/auth/datastore'],
-                $serviceAccount
-            );
-
-            $tokenData = $credentials->fetchAuthToken();
-            $accessToken = $tokenData['access_token'] ?? null;
-
-            if (! $accessToken) {
-                throw new \RuntimeException('No se pudo obtener un access token para Firestore.');
-            }
-
-            $projectId = (string) config('firebase.project_id');
-            $baseUrl = "https://firestore.googleapis.com/v1/projects/{$projectId}/databases/(default)";
+            [$accessToken, $baseUrl] = $this->resolveFirestoreConnection();
             $hasActiveFilters = $this->hasActiveFilters($selectedVending, $selectedFrom, $selectedTo);
 
             if (! $hasActiveFilters) {
@@ -117,6 +92,91 @@ class HistoryReportController extends Controller
             'totalAmount' => $totalAmount,
             'error' => $error,
         ]);
+    }
+
+    public function export(Request $request)
+    {
+        $selectedVending = $request->query('vending');
+        $selectedFrom = $request->query('desde');
+        $selectedTo = $request->query('hasta');
+
+        try {
+            [$accessToken, $baseUrl] = $this->resolveFirestoreConnection();
+            $allDocuments = $this->fetchAllHistoryDocuments($accessToken, $baseUrl);
+            $allRecords = $this->mapDocuments($allDocuments);
+            $filtered = $this->filterRecordsToCollection($allRecords, $selectedVending, $selectedFrom, $selectedTo);
+
+            $directory = public_path('exports/history');
+            if (! is_dir($directory)) {
+                mkdir($directory, 0755, true);
+            }
+
+            $fileName = 'history_export_'.now()->format('Ymd_His').'.csv';
+            $fullPath = $directory.DIRECTORY_SEPARATOR.$fileName;
+
+            $handle = fopen($fullPath, 'w');
+            if ($handle === false) {
+                throw new \RuntimeException('No se pudo crear el archivo de exportación.');
+            }
+
+            fwrite($handle, "\xEF\xBB\xBF");
+            fputcsv($handle, ['ID', 'Cantidad', 'Codigo', 'Fecha', 'Tipo', 'Vending Code'], ';');
+
+            foreach ($filtered as $record) {
+                fputcsv($handle, [
+                    (string) ($record['id'] ?? ''),
+                    (string) ($record['cantidad'] ?? ''),
+                    (string) ($record['codigo'] ?? ''),
+                    (string) ($record['fecha'] ?? ''),
+                    (string) ($record['tipo'] ?? ''),
+                    (string) ($record['vendingCode'] ?? ''),
+                ], ';');
+            }
+
+            fclose($handle);
+
+            return response()->download($fullPath, $fileName, [
+                'Content-Type' => 'text/csv; charset=UTF-8',
+            ]);
+        } catch (Throwable $exception) {
+            Log::error('No se pudo exportar el reporte history.', [
+                'exception' => $exception,
+            ]);
+
+            return response('No fue posible generar el archivo de exportación en este momento.', 500);
+        }
+    }
+
+    private function resolveFirestoreConnection(): array
+    {
+        if (! class_exists(ServiceAccountCredentials::class)) {
+            throw new \RuntimeException('Falta la dependencia "google/auth". Ejecuta composer update.');
+        }
+
+        $serviceAccount = [
+            'type' => 'service_account',
+            'project_id' => config('firebase.project_id'),
+            'private_key' => str_replace('\n', PHP_EOL, (string) config('firebase.private_key')),
+            'client_email' => config('firebase.client_email'),
+            'token_uri' => 'https://oauth2.googleapis.com/token',
+        ];
+
+        $credentials = new ServiceAccountCredentials(
+            ['https://www.googleapis.com/auth/datastore'],
+            $serviceAccount
+        );
+
+        $tokenData = $credentials->fetchAuthToken();
+        $accessToken = $tokenData['access_token'] ?? null;
+
+        if (! $accessToken) {
+            throw new \RuntimeException('No se pudo obtener un access token para Firestore.');
+        }
+
+        $projectId = (string) config('firebase.project_id');
+        $baseUrl = "https://firestore.googleapis.com/v1/projects/{$projectId}/databases/(default)";
+
+        return [$accessToken, $baseUrl];
     }
 
     private function hasActiveFilters(?string $selectedVending, ?string $selectedFrom, ?string $selectedTo): bool

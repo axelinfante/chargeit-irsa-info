@@ -312,8 +312,18 @@
                 </div>
 
                 <button type="submit" class="btn btn-primary">Filtrar</button>
+                <button
+                    type="button"
+                    class="btn btn-light"
+                    id="btn-exportar"
+                    data-export-url="{{ route('history.report.export') }}"
+                >
+                    Exportar Excel
+                </button>
                 <a href="{{ route('history.report') }}" class="btn btn-light" id="btn-limpiar">Limpiar</a>
             </form>
+
+            <div class="error" id="export-error" style="display: none;"></div>
 
             @if ($error)
                 <div class="error">{{ $error }}</div>
@@ -465,6 +475,86 @@
             if (limpiar) {
                 limpiar.addEventListener('click', function () {
                     showLoading();
+                });
+            }
+
+            var exportar = document.getElementById('btn-exportar');
+            if (exportar) {
+                var exportError = document.getElementById('export-error');
+                var exportDefaultText = exportar.textContent.trim();
+
+                function extractFilename(contentDisposition) {
+                    if (!contentDisposition) {
+                        return null;
+                    }
+
+                    var utfMatch = contentDisposition.match(/filename\\*=UTF-8''([^;]+)/i);
+                    if (utfMatch && utfMatch[1]) {
+                        return decodeURIComponent(utfMatch[1]);
+                    }
+
+                    var simpleMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+                    return simpleMatch && simpleMatch[1] ? simpleMatch[1] : null;
+                }
+
+                exportar.addEventListener('click', function () {
+                    if (exportar.disabled) {
+                        return;
+                    }
+
+                    exportar.disabled = true;
+                    exportar.textContent = 'Exportando...';
+                    if (exportError) {
+                        exportError.style.display = 'none';
+                        exportError.textContent = '';
+                    }
+
+                    var url = new URL(exportar.dataset.exportUrl, window.location.origin);
+                    var filters = new FormData(form);
+                    ['vending', 'desde', 'hasta'].forEach(function (key) {
+                        var value = filters.get(key);
+                        if (typeof value === 'string' && value.trim() !== '') {
+                            url.searchParams.set(key, value);
+                        }
+                    });
+
+                    fetch(url.toString(), {
+                        method: 'GET',
+                        headers: {
+                            'X-Requested-With': 'XMLHttpRequest',
+                        },
+                    })
+                        .then(function (response) {
+                            if (!response.ok) {
+                                return response.text().then(function (message) {
+                                    throw new Error(message || 'No fue posible generar el archivo.');
+                                });
+                            }
+
+                            var contentDisposition = response.headers.get('Content-Disposition');
+                            var filename = extractFilename(contentDisposition) || ('history_export_' + Date.now() + '.csv');
+
+                            return response.blob().then(function (blob) {
+                                var objectUrl = window.URL.createObjectURL(blob);
+                                var link = document.createElement('a');
+                                link.href = objectUrl;
+                                link.download = filename;
+                                document.body.appendChild(link);
+                                link.click();
+                                link.remove();
+                                window.URL.revokeObjectURL(objectUrl);
+                            });
+                        })
+                        .catch(function (error) {
+                            if (exportError) {
+                                exportError.textContent = error.message || 'No fue posible generar el archivo de exportación.';
+                                exportError.style.display = 'block';
+                            }
+                        })
+                        .finally(function () {
+                            exportar.disabled = false;
+                            exportar.textContent = exportDefaultText;
+                        });
                 });
             }
 
